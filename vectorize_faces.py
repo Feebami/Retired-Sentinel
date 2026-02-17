@@ -46,10 +46,10 @@ class FaceEncoder:
     def __init__(self, device: str):
         logger.info(f"Loading models on {device}...")
         self.device = device
-        self.mtcnn = MTCNN(margin=40, device=device)
+        self.mtcnn = MTCNN(margin=40, device=device, thresholds=[0.5, 0.6, 0.6])
         self.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
 
-    def get_embedding(self, image_bgr: np.ndarray) -> Optional[np.ndarray]:
+    def get_embedding(self, image_bgr: np.ndarray, save_face_path: str = None) -> Optional[np.ndarray]:
         """
         Takes a BGR image (OpenCV format), detects a face, and returns its embedding.
         """
@@ -62,6 +62,10 @@ class FaceEncoder:
             if face_tensor is None:
                 return None
                         
+            # Save face tensor for debugging
+            if save_face_path:
+                save_image(face_tensor, save_face_path, normalize=True)
+
             # Generate embedding
             with torch.no_grad():
                 # Move tensor to device if necessary
@@ -97,7 +101,7 @@ class VectorManager:
             person_vectors = []
             image_files = os.listdir(person_dir)
             
-            for img_name in image_files:
+            for i, img_name in enumerate(image_files):
                 img_path = os.path.join(person_dir, img_name)
                 img = cv2.imread(img_path)
                 
@@ -124,7 +128,6 @@ class VectorManager:
             return
             
         try:
-            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), filepath)
             with open(filepath, 'wb') as f:
                 pickle.dump(self.vectors, f)
             logger.info(f"Successfully saved {len(self.vectors)} identities to {filepath}")
@@ -150,12 +153,16 @@ class StatsAnalyzer:
             
             # Calculate all pairwise distances
             distances = []
+            similarities = []
             for v1, v2 in combinations(vectors, 2):
                 dist = np.linalg.norm(v1 - v2)
                 distances.append(dist)
+                similarity = np.dot(v1.flatten(), v2.flatten())
+                similarities.append(similarity)
                 
             avg_dist = sum(distances) / len(distances)
-            print(f"{name:<15}: Distance {avg_dist:.4f}")
+            avg_sim = sum(similarities) / len(similarities)
+            print(f"{name:<15}: Distance {avg_dist:.4f} | Similarity {avg_sim:.4f}")
 
     @staticmethod
     def test_image_match(encoder: FaceEncoder, vector_dict: Dict[str, List[np.ndarray]], test_img_path: str):
@@ -175,12 +182,14 @@ class StatsAnalyzer:
         for name, vectors in vector_dict.items():
             # Calculate distance to every vector we have for this person
             distances = [float(np.linalg.norm(test_vector - v)) for v in vectors]
+            similarities = [float(np.dot(test_vector.flatten(), v.flatten())) for v in vectors]
             
             # Formatting for cleaner output
             # dist_str = ", ".join([f"{d:.3f}" for d in distances])
             min_dist = min(distances) if distances else 0
+            max_sim = max(similarities) if similarities else 0
             
-            print(f"{name:<15}: Min Dist: {min_dist:.3f}")
+            print(f"{name:<15}: Min Dist: {min_dist:.3f} | Max Sim: {max_sim:.4f}")
 
 # -------------------------------------------------------------------------
 # Main Execution
