@@ -36,15 +36,15 @@ class Config:
     YOLO_MODEL = 'yolo26n.pt'
     
     # Security Parameters
-    RECOGNITION_THRESHOLD = 0.8
+    RECOGNITION_THRESHOLD = 0.7
     GRACE_PERIOD = 15 # seconds
-    DETECTION_RESET_TIME = 60 # seconds
-    SAFE_THRESHOLD = 2 # detections
-    SAFE_MODE_DURATION = 90 # seconds
+    DETECTION_RESET_TIME = 30 # seconds
+    SAFE_THRESHOLD = 1 # detections
+    SAFE_MODE_DURATION = 45 # seconds
     SECURITY_LOOP_DELAY = 0.1 # seconds
     
     # Buffer Parameters
-    BUFFER_DURATION = 15 # seconds
+    BUFFER_DURATION = 20 # seconds
     BUFFER_FPS = 1
     BUFFER_MAX_FRAMES = BUFFER_DURATION * BUFFER_FPS
     ALERT_STORAGE_DURATION = 30 # days
@@ -66,7 +66,7 @@ os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
 # -------------------------------------------------------------------------
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(Config.LOG_FILE),
@@ -166,7 +166,10 @@ class TelegramNotifier:
 class FaceRecognizer:
     """Handles Face Detection (MTCNN) and Recognition (InceptionResnet)."""
     def __init__(self, vectors_path):
-        self.mtcnn = MTCNN(margin=40)
+        self.mtcnn = MTCNN(
+            margin=40,
+            thresholds=[0.5, 0.6, 0.6]
+        )
         self.facenet = InceptionResnetV1(pretrained='vggface2').eval()
         self.known_faces = self._load_vectors(vectors_path)
 
@@ -180,8 +183,9 @@ class FaceRecognizer:
             logger.warning("face_vectors.pkl not found. No known faces loaded.")
             return {}
 
-    def identify(self, frame: np.ndarray, box) -> str:
-        """Returns the name of the person or 'Unknown'."""
+    def identify(self, frame: np.ndarray, box) -> tuple[str, Optional[dict]]:
+        """Returns the name of the person or 'Unknown' along with the minimum 
+        distance to known faces if a face is detected else None."""
         # Crop the person image
         img_crop = self._crop_person(frame, box)
 
@@ -191,26 +195,26 @@ class FaceRecognizer:
         start_time = time.time()
         face_tensor = self.mtcnn(img_rgb)
         mtcnn_time = time.time() - start_time
-        logger.debug(f"MTCNN detection time: {mtcnn_time:.3f}s")
+        # logger.debug(f"MTCNN detection time: {mtcnn_time:.3f}s")
         if face_tensor is None:
-            logger.debug("No face detected by MTCNN.")
-            return "Unknown"
+            # logger.debug("No face detected by MTCNN.")
+            return "Unknown", {'No Face Detected': None}
 
         # Generate embedding
         with torch.no_grad():
             start_time = time.time()
             embedding = self.facenet(face_tensor.unsqueeze(0)).detach().numpy()
             facenet_time = time.time() - start_time
-            logger.debug(f"Facenet embedding time: {facenet_time:.3f}s")
+            # logger.debug(f"Facenet embedding time: {facenet_time:.3f}s")
 
         # Compare with known faces
+        min_dist_dict = {}
         for name, vectors in self.known_faces.items():
-            for known_vec in vectors:
-                dist = np.linalg.norm(embedding - known_vec)
-                if dist < Config.RECOGNITION_THRESHOLD:
-                    return name
-        logger.debug("Face detected but no match.")
-        return "Unknown"
+            min_dist_dict[name] = min(np.linalg.norm(embedding - known_vec) for known_vec in vectors)
+            if min_dist_dict[name] < Config.RECOGNITION_THRESHOLD:
+                return name, min_dist_dict[name]
+        # logger.debug("Face detected but no match.")
+        return "Unknown", min_dist_dict
     
     def _crop_person(self, frame, box):
         x1, y1, x2, y2 = map(int, box.xyxy[0])
@@ -247,7 +251,7 @@ class PersonDetector:
             verbose=False
         )
         yolo_time = time.time() - start_time
-        logger.debug(f"YOLO detection time: {yolo_time:.3f}s")
+        # logger.debug(f"YOLO detection time: {yolo_time:.3f}s")
         return results[0]
 
 
@@ -400,14 +404,16 @@ class SecuritySystem:
 
 
         current_identities = []
+        distance_dicts = []
 
         if result.boxes:
             # Identify
             for box in result.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                identity = self.face_rec.identify(frame, box)
+                identity, min_dist_dict = self.face_rec.identify(frame, box)
 
                 current_identities.append(identity)
+                distance_dicts.append(min_dist_dict)
 
                 # Draw label
                 color = (0, 255, 0) if identity != "Unknown" else (0, 0, 255)
@@ -415,6 +421,8 @@ class SecuritySystem:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 
             logger.info(f"Detected: {current_identities}")
+            for identity, min_dist_dict in zip(current_identities, distance_dicts):
+                logger.debug(f'Detected: {identity} | Distances: {min_dist_dict}')
 
         # Update Security State
         alert_triggered = self.state_machine.update(current_identities)
